@@ -109,7 +109,7 @@ func (conn *Conn) Release() error {
 	return nil
 }
 
-func NewConnManager(builder builder, max, idle int) (*Conn, error) {
+func NewConnManager(builder builder, max, idle time.Duration) (*Conn, error) {
 	if max <= 0 || idle < 0 {
 		return nil, InvalidConfig
 	}
