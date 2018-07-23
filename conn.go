@@ -75,9 +75,7 @@ func (conn *Conn) Regain(closer Poolable) error {
 	if conn.closed {
 		return PoolClosed
 	}
-	conn.Lock()
 	conn.pool <- closer
-	conn.Unlock()
 	return nil
 }
 
