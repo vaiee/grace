@@ -20,13 +20,13 @@ type Poolable interface {
 type builder func() (Poolable, error)
 
 type Conn struct {
-	mutex   sync.Mutex
 	idle    time.Duration // 每个连接的空闲时间
 	pool    chan Poolable // 连接池
 	max     int           // 最大连接数
 	active  int           // 可用的连接数
 	closed  bool          // 连接池是否已关闭
 	builder builder       // 构造连接
+	mutex   *sync.Mutex
 }
 
 // 获取连接
