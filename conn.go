@@ -20,7 +20,7 @@ type Poolable interface {
 type builder func() (Poolable, error)
 
 type Conn struct {
-	sync.Mutex
+	mutex   sync.Mutex
 	idle    time.Duration // 每个连接的空闲时间
 	pool    chan Poolable // 连接池
 	max     int           // 最大连接数
@@ -52,20 +52,20 @@ func (conn *Conn) acquire() (Poolable, error) {
 	case closer := <-conn.pool:
 		return closer, nil
 	default:
-		conn.Lock()
+		conn.mutex.Lock()
 		if conn.active >= conn.max {
 			closer := <-conn.pool
-			conn.Unlock()
+			conn.mutex.Unlock()
 			return closer, nil
 		}
 		closer, err := conn.builder()
 		if err != nil {
-			conn.Unlock()
+			conn.mutex.Unlock()
 			return nil, err
 		}
 		conn.active++
 		conn.pool <- closer
-		conn.Unlock()
+		conn.mutex.Unlock()
 		return closer, nil
 	}
 }
@@ -81,13 +81,13 @@ func (conn *Conn) Regain(closer Poolable) error {
 
 // 关闭连接
 func (conn *Conn) Close(closer Poolable) error {
-	conn.Lock()
+	conn.mutex.Lock()
 	err := closer.Close()
 	if err != nil {
 		return err
 	}
 	conn.active--
-	conn.Unlock()
+	conn.mutex.Unlock()
 	return nil
 }
 
@@ -96,14 +96,14 @@ func (conn *Conn) Release() error {
 	if conn.closed {
 		return PoolClosed
 	}
-	conn.Lock()
+	conn.mutex.Lock()
 	close(conn.pool)
 	for closer := range conn.pool {
 		conn.active--
 		closer.Close()
 	}
 	conn.closed = true
-	conn.Unlock()
+	conn.mutex.Unlock()
 	return nil
 }
 
@@ -117,6 +117,7 @@ func NewConnManager(builder builder, max int, idle time.Duration) (*Conn, error)
 		pool:    make(chan Poolable, max),
 		closed:  false,
 		builder: builder,
+		mutex:   new(sync.Mutex),
 	}
 	for i := 0; i < max; i++ {
 		closer, err := builder()
