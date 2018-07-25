@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"sync"
-	"time"
 )
 
 var (
@@ -14,22 +13,22 @@ var (
 
 type Poolable interface {
 	io.Closer
-	GetActiveTime() time.Time
+	Done() <-chan struct{}
 }
 
 type builder func() (Poolable, error)
 
 type Conn struct {
-	idle    time.Duration // 每个连接的空闲时间
-	pool    chan Poolable // 连接池
-	max     int           // 最大连接数
-	active  int           // 可用的连接数
-	closed  bool          // 连接池是否已关闭
-	builder builder       // 构造连接
+	pool    chan Poolable // 可关闭对象池
+	max     int           // 池容量
+	active  int           // 可用的对象数
+	closed  bool          // 池是否已关闭
+	builder builder       // 构造对象
 	mutex   *sync.Mutex
+	event   chan struct{} // 关闭对象之后通知排队者有对象可用
 }
 
-// 获取连接
+// 获取对象
 func (conn *Conn) Acquire() (Poolable, error) {
 	if conn.closed {
 		return nil, PoolClosed
@@ -39,24 +38,31 @@ func (conn *Conn) Acquire() (Poolable, error) {
 		if err != nil {
 			return nil, err
 		}
-		if closer.GetActiveTime().Add(time.Duration(conn.idle)).Before(time.Now()) {
+		select {
+		case <-closer.Done():
 			conn.Close(closer)
 			continue
+		default:
+			return closer, nil
 		}
-		return closer, nil
 	}
 }
 
 func (conn *Conn) acquire() (Poolable, error) {
+acquire:
 	select {
 	case closer := <-conn.pool:
 		return closer, nil
 	default:
 		conn.mutex.Lock()
 		if conn.active >= conn.max {
-			closer := <-conn.pool
 			conn.mutex.Unlock()
-			return closer, nil
+			select {
+			case closer := <-conn.pool:
+				return closer, nil
+			case <-conn.event:
+				goto acquire
+			}
 		}
 		closer, err := conn.builder()
 		if err != nil {
@@ -64,13 +70,13 @@ func (conn *Conn) acquire() (Poolable, error) {
 			return nil, err
 		}
 		conn.active++
-		conn.pool <- closer
 		conn.mutex.Unlock()
-		return closer, nil
+		conn.pool <- closer
+		return <-conn.pool, nil
 	}
 }
 
-// 回收连接
+// 回收对象
 func (conn *Conn) Regain(closer Poolable) error {
 	if conn.closed {
 		return PoolClosed
@@ -79,7 +85,7 @@ func (conn *Conn) Regain(closer Poolable) error {
 	return nil
 }
 
-// 关闭连接
+// 关闭对象
 func (conn *Conn) Close(closer Poolable) error {
 	conn.mutex.Lock()
 	err := closer.Close()
@@ -88,10 +94,11 @@ func (conn *Conn) Close(closer Poolable) error {
 	}
 	conn.active--
 	conn.mutex.Unlock()
+	conn.event <- struct{}{}
 	return nil
 }
 
-// 关闭连接池
+// 关闭对象池
 func (conn *Conn) Release() error {
 	if conn.closed {
 		return PoolClosed
@@ -107,17 +114,18 @@ func (conn *Conn) Release() error {
 	return nil
 }
 
-func NewConnManager(builder builder, max int, idle time.Duration) (*Conn, error) {
-	if max <= 0 || idle < 0 {
+// 创建对象管理器
+func NewConnManager(max int, builder builder) (*Conn, error) {
+	if max <= 0 {
 		return nil, InvalidConfig
 	}
 	conn := &Conn{
-		idle:    idle,
 		max:     max,
 		pool:    make(chan Poolable, max),
 		closed:  false,
 		builder: builder,
 		mutex:   new(sync.Mutex),
+		event:   make(chan struct{}),
 	}
 	for i := 0; i < max; i++ {
 		closer, err := builder()
