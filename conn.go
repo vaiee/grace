@@ -13,6 +13,7 @@ var (
 
 type Poolable interface {
 	io.Closer
+	// context.Done()
 	Done() <-chan struct{}
 }
 
