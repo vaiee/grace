@@ -20,13 +20,13 @@ type Poolable interface {
 type builder func() (Poolable, error)
 
 type Conn struct {
+	notice  chan struct{} // 关闭对象之后通知排队者有对象可用
 	pool    chan Poolable // 可关闭对象池
 	max     int           // 池容量
 	active  int           // 可用的对象数
 	closed  bool          // 池是否已关闭
 	builder builder       // 构造对象
 	mutex   *sync.Mutex
-	event   chan struct{} // 关闭对象之后通知排队者有对象可用
 }
 
 // 获取对象
@@ -61,7 +61,7 @@ acquire:
 			select {
 			case closer := <-conn.pool:
 				return closer, nil
-			case <-conn.event:
+			case <-conn.notice:
 				goto acquire
 			}
 		}
@@ -71,8 +71,8 @@ acquire:
 			return nil, err
 		}
 		conn.active++
-		conn.mutex.Unlock()
 		conn.pool <- closer
+		conn.mutex.Unlock()
 		return <-conn.pool, nil
 	}
 }
@@ -94,8 +94,8 @@ func (conn *Conn) Close(closer Poolable) error {
 		return err
 	}
 	conn.active--
+	conn.notice <- struct{}{}
 	conn.mutex.Unlock()
-	conn.event <- struct{}{}
 	return nil
 }
 
@@ -121,12 +121,12 @@ func NewConnManager(max int, builder builder) (*Conn, error) {
 		return nil, InvalidConfig
 	}
 	conn := &Conn{
+		notice:  make(chan struct{}, max),
 		max:     max,
 		pool:    make(chan Poolable, max),
 		closed:  false,
 		builder: builder,
 		mutex:   new(sync.Mutex),
-		event:   make(chan struct{}),
 	}
 	for i := 0; i < max; i++ {
 		closer, err := builder()
